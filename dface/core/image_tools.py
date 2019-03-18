@@ -16,7 +16,7 @@ def convert_image_to_tensor(image):
         -------
         image_tensor: pytorch.FloatTensor, c * h * w
         """
-    image = image.astype(np.float)
+    # image = image.astype(np.float)
     return transform(image)
     # return transform(image)
 

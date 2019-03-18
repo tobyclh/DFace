@@ -2,7 +2,6 @@ import cv2
 import time
 import numpy as np
 import torch
-from torch.autograd.variable import Variable
 from dface.core.models import PNet,RNet,ONet
 import dface.core.utils as utils
 import dface.core.image_tools as image_tools
@@ -13,7 +12,7 @@ def create_mtcnn_net(p_model_path=None, r_model_path=None, o_model_path=None, us
     pnet, rnet, onet = None, None, None
 
     if p_model_path is not None:
-        pnet = PNet(use_cuda=use_cuda)       
+        pnet = PNet(use_cuda=use_cuda)
         if(use_cuda):
             pnet.load_state_dict(torch.load(p_model_path))
             pnet.cuda()
@@ -261,13 +260,11 @@ class MtcnnDetector(object):
             image_tensor = image_tools.convert_image_to_tensor(im_resized)
             feed_imgs.append(image_tensor)
             feed_imgs = torch.stack(feed_imgs)
-            feed_imgs = Variable(feed_imgs)
-
 
             if self.pnet_detector.use_cuda:
                 feed_imgs = feed_imgs.cuda()
 
-            cls_map, reg = self.pnet_detector(feed_imgs)
+            cls_map, reg = self.pnet_detector(feed_imgs.float())
 
             cls_map_np = image_tools.convert_chwTensor_to_hwcNumpy(cls_map.cpu())
             reg_np = image_tools.convert_chwTensor_to_hwcNumpy(reg.cpu())
@@ -393,12 +390,12 @@ face candidates:%d, current batch_size:%d"%(num_boxes, batch_size)
             crop_im_tensor = image_tools.convert_image_to_tensor(crop_im)
             # cropped_ims_tensors[i, :, :, :] = crop_im_tensor
             cropped_ims_tensors.append(crop_im_tensor)
-        feed_imgs = Variable(torch.stack(cropped_ims_tensors))
+        feed_imgs = torch.stack(cropped_ims_tensors)
 
         if self.rnet_detector.use_cuda:
             feed_imgs = feed_imgs.cuda()
 
-        cls_map, reg = self.rnet_detector(feed_imgs)
+        cls_map, reg = self.rnet_detector(feed_imgs.float())
 
         cls_map = cls_map.cpu().data.numpy()
         reg = reg.cpu().data.numpy()
@@ -513,12 +510,12 @@ face candidates:%d, current batch_size:%d"%(num_boxes, batch_size)
             crop_im_tensor = image_tools.convert_image_to_tensor(crop_im)
             # cropped_ims_tensors[i, :, :, :] = crop_im_tensor
             cropped_ims_tensors.append(crop_im_tensor)
-        feed_imgs = Variable(torch.stack(cropped_ims_tensors))
+        feed_imgs = torch.stack(cropped_ims_tensors)
 
         if self.rnet_detector.use_cuda:
             feed_imgs = feed_imgs.cuda()
 
-        cls_map, reg, landmark = self.onet_detector(feed_imgs)
+        cls_map, reg, landmark = self.onet_detector(feed_imgs.float())
 
         cls_map = cls_map.cpu().data.numpy()
         reg = reg.cpu().data.numpy()
@@ -630,7 +627,7 @@ face candidates:%d, current batch_size:%d"%(num_boxes, batch_size)
 
             t3 = time.time() - t
             t = time.time()
-            print("time cost " + '{:.3f}'.format(t1+t2+t3) + '  pnet {:.3f}  rnet {:.3f}  onet {:.3f}'.format(t1, t2, t3))
+            # print("time cost " + '{:.3f}'.format(t1+t2+t3) + '  pnet {:.3f}  rnet {:.3f}  onet {:.3f}'.format(t1, t2, t3))
 
         return boxes_align, landmark_align
 
