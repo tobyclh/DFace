@@ -56,7 +56,6 @@ def convert_to_square(bbox):
     square_bbox[:, 3] = square_bbox[:, 1] + max_side - 1
     return square_bbox
 
-@profile
 def nms(dets, thresh, mode="Union"):
     """
     greedily select boxes with high confidence
