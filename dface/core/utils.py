@@ -56,7 +56,7 @@ def convert_to_square(bbox):
     square_bbox[:, 3] = square_bbox[:, 1] + max_side - 1
     return square_bbox
 
-
+@profile
 def nms(dets, thresh, mode="Union"):
     """
     greedily select boxes with high confidence
@@ -81,7 +81,7 @@ def nms(dets, thresh, mode="Union"):
         [description]
     """
 
-    
+
     left = dets[:, 0]
     top = dets[:, 1]
     right = dets[:, 2]
@@ -102,8 +102,8 @@ def nms(dets, thresh, mode="Union"):
         xx2 = torch.min(right[i], right[order[1:]])
         yy2 = torch.min(bottom[i], bottom[order[1:]])
 
-        w = (xx2 - xx1 + 1).clamp(min=0)
-        h = (yy2 - yy1 + 1).clamp(min=0)
+        w = (xx2 - xx1 + 1).clamp_(min=0)
+        h = (yy2 - yy1 + 1).clamp_(min=0)
         inter = w * h
         if mode == "Union":
             ovr = inter / (areas[i] + areas[order[1:]] - inter)

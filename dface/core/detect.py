@@ -67,36 +67,8 @@ class MtcnnDetector(object):
         self.stride=stride
         self.thresh = threshold
         self.scale_factor = scale_factor
-        self.tensortype = torch.cuda if self.use_cuda else torch
-
+   
     # @script
-    
-    def square_bbox(self, bbox):
-        """
-            convert bbox to square
-        Parameters:
-        ----------
-            bbox: torch Tensor , shape n x m
-                input bbox
-        Returns:
-        -------
-            square bbox
-        """
-        square_bbox = bbox.clone()
-
-        h = bbox[:, 3] - bbox[:, 1] + 1
-        w = bbox[:, 2] - bbox[:, 0] + 1
-        
-        l = torch.max(h, w)
-
-        square_bbox[:, 0] = bbox[:, 0] + w*0.5 - l*0.5
-        square_bbox[:, 1] = bbox[:, 1] + h*0.5 - l*0.5
-
-        square_bbox[:, 2] = square_bbox[:, 0] + l - 1
-        square_bbox[:, 3] = square_bbox[:, 1] + l - 1
-        return square_bbox
-
-    
     def generate_bounding_box(self, _map, reg, scale, threshold):
         """
             generate bbox from feature map
@@ -120,103 +92,27 @@ class MtcnnDetector(object):
         t_index = (_map > threshold).nonzero()
         t_index = t_index.t()
         # print(f't_index {t_index.shape}')
-        # find nothing
-        if t_index.shape[0] == 0:
-            return torch.Tensor([])
+        if t_index.shape[0] > 0:
+            dx1, dy1, dx2, dy2 = reg[0, 0, t_index[1], t_index[2]], reg[0, 1, t_index[1], t_index[2]], reg[0, 2, t_index[1], t_index[2]], reg[0, 3, t_index[1], t_index[2]]
+            reg = torch.stack([dx1, dy1, dx2, dy2])
 
-        dx1, dy1, dx2, dy2 = [reg[0, i, t_index[1], t_index[2]] for i in range(4)]
-        reg = torch.stack([dx1, dy1, dx2, dy2])
+            score = _map[:, t_index[1], t_index[2]]
+            t_index = t_index.float()
+            boundingbox = torch.cat([((stride * t_index[2:2+1]) / scale),
+                                    ((stride * t_index[1:1+1]) / scale),
+                                    ((stride * t_index[2:2+1] + cellsize) / scale),
+                                    ((stride * t_index[1:1+1] + cellsize) / scale),
+                                    score,
+                                    reg,
+                                    # landmarks
+                                    ])
+            boundingbox = boundingbox.t()
+        else: 
+            # find nothing
+            boundingbox = torch.Tensor([])
+        return boundingbox
 
-        score = _map[:, t_index[1], t_index[2]]
-        t_index = t_index.float()
-        boundingbox = torch.cat([((stride * t_index[2:2+1]) / scale),
-                                 ((stride * t_index[1:1+1]) / scale),
-                                 ((stride * t_index[2:2+1] + cellsize) / scale),
-                                 ((stride * t_index[1:1+1] + cellsize) / scale),
-                                 score,
-                                 reg,
-                                 # landmarks
-                                 ])
 
-        return boundingbox.t()
-
-    # @script
-    def resize_image(self, img, scale):
-        """
-        resize image and transform dimention to [batchsize, channel, height, width]
-        Parameters:
-        ----------
-            img: torch Tensor , BxCxHxW
-
-            scale: float number
-                scale factor of resize operation
-        Returns:
-        -------
-            transformed image tensor , 1 x channel x height x width
-        """
-        _, _, height, width = img.shape
-        new_height = int(height * scale)     # resized new height
-        new_width = int(width * scale)       # resized new width
-        new_dim = (new_height, new_width)
-        img_resized = F.interpolate(img, size=new_dim, mode='bilinear', align_corners=True)
-        return img_resized
-
-    
-    def pad(self, bboxes, w, h):
-        """
-            pad the the boxes
-        Parameters:
-        ----------
-            bboxes: torch Tensor, N x 5
-                input bboxes
-            w: float number
-                width of the input image
-            h: float number
-                height of the input image
-        Returns :
-        ------
-            dy, dx : torch Tensor, n x 1
-                start point of the bbox in target image
-            edy, edx : torch Tensor, n x 1
-                end point of the bbox in target image
-            y, x : torch Tensor, n x 1
-                start point of the bbox in original image
-            ex, ex : torch Tensor, n x 1
-                end point of the bbox in original image
-            tmph, tmpw: torch Tensor, n x 1
-                height and width of the bbox
-        """
-
-        tmpw = (bboxes[:, 2] - bboxes[:, 0] + 1).float()
-        tmph = (bboxes[:, 3] - bboxes[:, 1] + 1).float()
-        numbox = bboxes.shape[0]
-
-        dx = self.tensortype.FloatTensor(numbox).fill_(0)
-        dy = self.tensortype.FloatTensor(numbox).fill_(0)
-        edx, edy  = tmpw.clone()-1, tmph.clone()-1
-
-        x, y, ex, ey = bboxes[:, 0], bboxes[:, 1], bboxes[:, 2], bboxes[:, 3]
-
-        tmp_index = (ex > w-1).nonzero()
-        edx[tmp_index] = tmpw[tmp_index] + w - 2 - ex[tmp_index]
-        ex[tmp_index] = w - 1
-
-        tmp_index = (ey > h-1).nonzero()
-        edy[tmp_index] = tmph[tmp_index] + h - 2 - ey[tmp_index]
-        ey[tmp_index] = h - 1
-
-        tmp_index = (x < 0).nonzero()
-        dx[tmp_index] = 0 - x[tmp_index]
-        x[tmp_index] = 0
-
-        tmp_index = (y < 0).nonzero()
-        dy[tmp_index] = 0 - y[tmp_index]
-        y[tmp_index] = 0
-
-        return_list = [dy, edy, dx, edx, y, ey, x, ex, tmpw, tmph]
-        return_list = [item.int() for item in return_list]
-
-        return return_list
 
     
     def detect_pnet(self, im):
@@ -238,24 +134,26 @@ class MtcnnDetector(object):
 
         net_size = 12
         current_scale = float(net_size) / self.min_face_size    # find initial scale
-        im_resized = self.resize_image(im, current_scale)
+        im_resized = resize_image(im, current_scale)
         _, _, current_height, current_width = im_resized.shape
 
         # fcn
         all_boxes = list()
+        start_while_loop = time.time()
+
         while min(current_height, current_width) > net_size:
             feed_imgs = im_resized
 
             if self.pnet_detector.use_cuda:
                 feed_imgs = feed_imgs.cuda()
 
-            cls_map, reg = self.pnet_detector(feed_imgs.float())
-
+            cls_map, reg = self.pnet_detector(feed_imgs)
+            cls_map, reg = cls_map.cpu(), reg.cpu()
             boxes = self.generate_bounding_box(cls_map[ 0, :, :], reg, current_scale, self.thresh[0])
 
             current_scale *= self.scale_factor
             
-            im_resized = self.resize_image(im, current_scale)
+            im_resized = resize_image(im, current_scale)
             _, _, current_height, current_width = im_resized.shape
 
             if boxes.nelement() == 0:
@@ -263,6 +161,9 @@ class MtcnnDetector(object):
             keep = utils.nms(boxes[:, :5], 0.5, 'Union')
             boxes = boxes[keep]
             all_boxes.append(boxes)
+        end_while_loop = time.time()
+        print(f'end_while_loop : {end_while_loop - start_while_loop}')
+
 
         if len(all_boxes) == 0:
             return None, None
@@ -322,9 +223,9 @@ class MtcnnDetector(object):
         if dets is None:
             return None,None
 
-        dets = self.square_bbox(dets)
+        dets = square_bbox(dets)
         dets[:, 0:4] = torch.round(dets[:, 0:4])
-        [dy, edy, dx, edx, y, ey, x, ex, tmpw, tmph] = self.pad(dets, w, h)
+        [dy, edy, dx, edx, y, ey, x, ex, tmpw, tmph] = pad(dets, w, h)
         num_boxes = dets.shape[0]
 
         '''
@@ -339,7 +240,7 @@ class MtcnnDetector(object):
         # cropped_ims_tensors = np.zeros((num_boxes, 3, 24, 24), dtype=np.float32)
         cropped_ims_tensors = []
         for i in range(num_boxes):
-            tmp = self.tensortype.FloatTensor(1, 3, tmph[i], tmpw[i]).fill_(0)
+            tmp = torch.zeros(1, 3, tmph[i], tmpw[i])
             tmp[..., dy[i]:edy[i]+1, dx[i]:edx[i]+1] = im[..., y[i]:ey[i]+1, x[i]:ex[i]+1]
             crop_im = F.interpolate(tmp, size=(24, 24))
             crop_im_tensor = crop_im
@@ -351,8 +252,8 @@ class MtcnnDetector(object):
 
         cls_map, reg = self.rnet_detector(feed_imgs)
 
-        cls_map = cls_map
-        reg = reg
+        cls_map = cls_map.cpu()
+        reg = reg.cpu()
         # landmark = landmark.cpu().data.numpy()
 
 
@@ -421,17 +322,17 @@ class MtcnnDetector(object):
         if dets is None:
             return None, None
 
-        dets = self.square_bbox(dets)
+        dets = square_bbox(dets)
         dets[:, 0:4] = torch.round(dets[:, 0:4])
 
-        [dy, edy, dx, edx, y, ey, x, ex, tmpw, tmph] = self.pad(dets, w, h)
+        [dy, edy, dx, edx, y, ey, x, ex, tmpw, tmph] = pad(dets, w, h, cuda=1 if self.use_cuda else 0)
         num_boxes = dets.shape[0]
 
 
         # cropped_ims_tensors = np.zeros((num_boxes, 3, 24, 24), dtype=np.float32)
         cropped_ims_tensors = []
         for i in range(num_boxes):
-            tmp = self.tensortype.FloatTensor(1, 3, tmph[i], tmpw[i]).fill_(0)
+            tmp = torch.FloatTensor(1, 3, tmph[i], tmpw[i]).fill_(0)
             tmp[..., dy[i]:edy[i]+1, dx[i]:edx[i]+1] = im[..., y[i]:ey[i]+1, x[i]:ex[i]+1]
             crop_im = F.interpolate(tmp, size=(48, 48))
             crop_im_tensor = crop_im
@@ -443,6 +344,7 @@ class MtcnnDetector(object):
             feed_imgs = feed_imgs.cuda()
 
         cls_map, reg, landmark = self.onet_detector(feed_imgs)
+        cls_map, reg, landmark = cls_map.cpu(), reg.cpu(), landmark.cpu()
 
         keep_inds = (cls_map.squeeze() > self.thresh[2]).nonzero().squeeze()
 
@@ -507,29 +409,143 @@ class MtcnnDetector(object):
         landmark_align = torch.Tensor([])
 
         img = image_tools.convert_image_to_tensor(img).unsqueeze(0)
-        if self.use_cuda:
-            img = img.cuda()
+
+        t = time.time()
 
         # pnet
         if self.pnet_detector:
-            boxes, boxes_align = self.detect_pnet(img.clone())
+            boxes, boxes_align = self.detect_pnet(img)
             if boxes_align is None:
                 return torch.Tensor([]), torch.Tensor([])
+            t1 = time.time() - t
+            t = time.time()
 
         # rnet
         if self.rnet_detector:
-            boxes, boxes_align = self.detect_rnet(img.clone(), boxes_align)
+            boxes, boxes_align = self.detect_rnet(img, boxes_align)
             if boxes_align is None:
                 return torch.Tensor([]), torch.Tensor([])
+            t2 = time.time() - t
+            t = time.time()
 
         # onet
         if self.onet_detector:
-            boxes_align, landmark_align = self.detect_onet(img.clone(), boxes_align)
+            boxes_align, landmark_align = self.detect_onet(img, boxes_align)
             if boxes_align is None:
                 return torch.Tensor([]), torch.Tensor([])
+            t3 = time.time() - t
+            t = time.time()
+            print("time cost " + '{:.3f}'.format(t1+t2+t3) + '  pnet {:.3f}  rnet {:.3f}  onet {:.3f}'.format(t1, t2, t3))
 
         return boxes_align, landmark_align
 
 
 
 
+@script
+def resize_image(img, scale):
+    # type: (Tensor, float) -> Tensor
+    """
+    resize image and transform dimention to [batchsize, channel, height, width]
+    Parameters:
+    ----------
+        img: torch Tensor , BxCxHxW
+
+        scale: float number
+            scale factor of resize operation
+    Returns:
+    -------
+        transformed image tensor , 1 x channel x height x width
+    """
+    _, _, height, width = img.shape
+    new_height = int(height * scale)     # resized new height
+    new_width = int(width * scale)       # resized new width
+    new_dim = (new_height, new_width)
+    img_resized = F.interpolate(img, size=new_dim, mode='bilinear', align_corners=True)
+    return img_resized
+
+
+@script
+def square_bbox(bbox):
+    """
+        convert bbox to square
+    Parameters:
+    ----------
+        bbox: torch Tensor , shape n x m
+            input bbox
+    Returns:
+    -------
+        square bbox
+    """
+    square_bbox = bbox
+
+    h = bbox[:, 3] - bbox[:, 1] + 1
+    w = bbox[:, 2] - bbox[:, 0] + 1
+    
+    l = torch.max(h, w)
+
+    square_bbox[:, 0] = bbox[:, 0] + w*0.5 - l*0.5
+    square_bbox[:, 1] = bbox[:, 1] + h*0.5 - l*0.5
+
+    square_bbox[:, 2] = square_bbox[:, 0] + l - 1
+    square_bbox[:, 3] = square_bbox[:, 1] + l - 1
+    return square_bbox
+
+
+
+def pad(bboxes, w, h, cuda=0):
+    """
+        pad the the boxes
+    Parameters:
+    ----------
+        bboxes: torch Tensor, N x 5
+            input bboxes
+        w: float number
+            width of the input image
+        h: float number
+            height of the input image
+    Returns :
+    ------
+        dy, dx : torch Tensor, n x 1
+            start point of the bbox in target image
+        edy, edx : torch Tensor, n x 1
+            end point of the bbox in target image
+        y, x : torch Tensor, n x 1
+            start point of the bbox in original image
+        ex, ex : torch Tensor, n x 1
+            end point of the bbox in original image
+        tmph, tmpw: torch Tensor, n x 1
+            height and width of the bbox
+    """
+
+    tmpw = (bboxes[:, 2] - bboxes[:, 0] + 1).float()
+    tmph = (bboxes[:, 3] - bboxes[:, 1] + 1).float()
+    numbox = bboxes.shape[0]
+
+    dx = torch.zeros(numbox)
+    dy = torch.zeros(numbox)
+
+    edx, edy  = tmpw.clone()-1, tmph.clone()-1
+
+    x, y, ex, ey = bboxes[:, 0], bboxes[:, 1], bboxes[:, 2], bboxes[:, 3]
+
+    tmp_index = (ex > w-1).nonzero()
+    edx[tmp_index] = tmpw[tmp_index] + w - 2 - ex[tmp_index]
+    ex[tmp_index] = w - 1
+
+    tmp_index = (ey > h-1).nonzero()
+    edy[tmp_index] = tmph[tmp_index] + h - 2 - ey[tmp_index]
+    ey[tmp_index] = h - 1
+
+    tmp_index = (x < 0).nonzero()
+    dx[tmp_index] = 0 - x[tmp_index]
+    x[tmp_index] = 0
+
+    tmp_index = (y < 0).nonzero()
+    dy[tmp_index] = 0 - y[tmp_index]
+    y[tmp_index] = 0
+
+    return_list = [dy.int(), edy.int(), dx.int(), edx.int(), y.int(), ey.int(), x.int(), ex.int(), tmpw.int(), tmph.int()]
+    # return_list = [item.int() for item in return_list]
+
+    return return_list
