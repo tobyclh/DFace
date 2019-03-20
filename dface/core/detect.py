@@ -2,10 +2,11 @@ import cv2
 import time
 import numpy as np
 import torch
+import torch.nn.functional as F
 from dface.core.models import PNet,RNet,ONet
 import dface.core.utils as utils
 import dface.core.image_tools as image_tools
-
+from torch.jit import script
 
 def create_mtcnn_net(p_model_path=None, r_model_path=None, o_model_path=None, use_cuda=True):
 
@@ -61,38 +62,33 @@ class MtcnnDetector(object):
         self.pnet_detector = pnet
         self.rnet_detector = rnet
         self.onet_detector = onet
+        self.use_cuda = self.rnet_detector.use_cuda
         self.min_face_size = min_face_size
         self.stride=stride
         self.thresh = threshold
         self.scale_factor = scale_factor
+        self.tensortype = torch.cuda if self.use_cuda else torch
 
-
-    def unique_image_format(self,im):
-        if not isinstance(im,np.ndarray):
-            if im.mode == 'I':
-                im = np.array(im, np.int32, copy=False)
-            elif im.mode == 'I;16':
-                im = np.array(im, np.int16, copy=False)
-            else:
-                im = np.asarray(im)
-        return im
-
+    # @script
+    
     def square_bbox(self, bbox):
         """
             convert bbox to square
         Parameters:
         ----------
-            bbox: numpy array , shape n x m
+            bbox: torch Tensor , shape n x m
                 input bbox
         Returns:
         -------
             square bbox
         """
-        square_bbox = bbox.copy()
+        square_bbox = bbox.clone()
 
         h = bbox[:, 3] - bbox[:, 1] + 1
         w = bbox[:, 2] - bbox[:, 0] + 1
-        l = np.maximum(h,w)
+        
+        l = torch.max(h, w)
+
         square_bbox[:, 0] = bbox[:, 0] + w*0.5 - l*0.5
         square_bbox[:, 1] = bbox[:, 1] + h*0.5 - l*0.5
 
@@ -100,15 +96,15 @@ class MtcnnDetector(object):
         square_bbox[:, 3] = square_bbox[:, 1] + l - 1
         return square_bbox
 
-
-    def generate_bounding_box(self, map, reg, scale, threshold):
+    
+    def generate_bounding_box(self, _map, reg, scale, threshold):
         """
             generate bbox from feature map
         Parameters:
         ----------
-            map: numpy array , n x m x 1
+            map: torcn Tensor , 1 x n x m
                 detect score for each position
-            reg: numpy array , n x m x 4
+            reg: torcn Tensor , 4 x n x m
                 bbox
             scale: float number
                 scale of this detection
@@ -121,62 +117,57 @@ class MtcnnDetector(object):
         stride = 2
         cellsize = 12
 
-        t_index = np.where(map > threshold)
-
+        t_index = (_map > threshold).nonzero()
+        t_index = t_index.t()
+        # print(f't_index {t_index.shape}')
         # find nothing
-        if t_index[0].size == 0:
-            return np.array([])
+        if t_index.shape[0] == 0:
+            return torch.Tensor([])
 
-        dx1, dy1, dx2, dy2 = [reg[0, t_index[0], t_index[1], i] for i in range(4)]
-        reg = np.array([dx1, dy1, dx2, dy2])
+        dx1, dy1, dx2, dy2 = [reg[0, i, t_index[1], t_index[2]] for i in range(4)]
+        reg = torch.stack([dx1, dy1, dx2, dy2])
 
-        # lefteye_dx, lefteye_dy, righteye_dx, righteye_dy, nose_dx, nose_dy, \
-        # leftmouth_dx, leftmouth_dy, rightmouth_dx, rightmouth_dy = [landmarks[0, t_index[0], t_index[1], i] for i in range(10)]
-        #
-        # landmarks = np.array([lefteye_dx, lefteye_dy, righteye_dx, righteye_dy, nose_dx, nose_dy, leftmouth_dx, leftmouth_dy, rightmouth_dx, rightmouth_dy])
-
-
-
-        score = map[t_index[0], t_index[1], 0]
-        boundingbox = np.vstack([np.round((stride * t_index[1]) / scale),
-                                 np.round((stride * t_index[0]) / scale),
-                                 np.round((stride * t_index[1] + cellsize) / scale),
-                                 np.round((stride * t_index[0] + cellsize) / scale),
+        score = _map[:, t_index[1], t_index[2]]
+        t_index = t_index.float()
+        boundingbox = torch.cat([((stride * t_index[2:2+1]) / scale),
+                                 ((stride * t_index[1:1+1]) / scale),
+                                 ((stride * t_index[2:2+1] + cellsize) / scale),
+                                 ((stride * t_index[1:1+1] + cellsize) / scale),
                                  score,
                                  reg,
                                  # landmarks
                                  ])
 
-        return boundingbox.T
+        return boundingbox.t()
 
-
+    # @script
     def resize_image(self, img, scale):
         """
-            resize image and transform dimention to [batchsize, channel, height, width]
+        resize image and transform dimention to [batchsize, channel, height, width]
         Parameters:
         ----------
-            img: numpy array , height x width x channel
-                input image, channels in BGR order here
+            img: torch Tensor , BxCxHxW
+
             scale: float number
                 scale factor of resize operation
         Returns:
         -------
             transformed image tensor , 1 x channel x height x width
         """
-        height, width, channels = img.shape
+        _, _, height, width = img.shape
         new_height = int(height * scale)     # resized new height
         new_width = int(width * scale)       # resized new width
-        new_dim = (new_width, new_height)
-        img_resized = cv2.resize(img, new_dim, interpolation=cv2.INTER_LINEAR)      # resized image
+        new_dim = (new_height, new_width)
+        img_resized = F.interpolate(img, size=new_dim, mode='bilinear', align_corners=True)
         return img_resized
 
-
+    
     def pad(self, bboxes, w, h):
         """
             pad the the boxes
         Parameters:
         ----------
-            bboxes: numpy array, n x 5
+            bboxes: torch Tensor, N x 5
                 input bboxes
             w: float number
                 width of the input image
@@ -184,56 +175,56 @@ class MtcnnDetector(object):
                 height of the input image
         Returns :
         ------
-            dy, dx : numpy array, n x 1
+            dy, dx : torch Tensor, n x 1
                 start point of the bbox in target image
-            edy, edx : numpy array, n x 1
+            edy, edx : torch Tensor, n x 1
                 end point of the bbox in target image
-            y, x : numpy array, n x 1
+            y, x : torch Tensor, n x 1
                 start point of the bbox in original image
-            ex, ex : numpy array, n x 1
+            ex, ex : torch Tensor, n x 1
                 end point of the bbox in original image
-            tmph, tmpw: numpy array, n x 1
+            tmph, tmpw: torch Tensor, n x 1
                 height and width of the bbox
         """
 
-        tmpw = (bboxes[:, 2] - bboxes[:, 0] + 1).astype(np.int32)
-        tmph = (bboxes[:, 3] - bboxes[:, 1] + 1).astype(np.int32)
+        tmpw = (bboxes[:, 2] - bboxes[:, 0] + 1).float()
+        tmph = (bboxes[:, 3] - bboxes[:, 1] + 1).float()
         numbox = bboxes.shape[0]
 
-        dx = np.zeros((numbox, ))
-        dy = np.zeros((numbox, ))
-        edx, edy  = tmpw.copy()-1, tmph.copy()-1
+        dx = self.tensortype.FloatTensor(numbox).fill_(0)
+        dy = self.tensortype.FloatTensor(numbox).fill_(0)
+        edx, edy  = tmpw.clone()-1, tmph.clone()-1
 
         x, y, ex, ey = bboxes[:, 0], bboxes[:, 1], bboxes[:, 2], bboxes[:, 3]
 
-        tmp_index = np.where(ex > w-1)
+        tmp_index = (ex > w-1).nonzero()
         edx[tmp_index] = tmpw[tmp_index] + w - 2 - ex[tmp_index]
         ex[tmp_index] = w - 1
 
-        tmp_index = np.where(ey > h-1)
+        tmp_index = (ey > h-1).nonzero()
         edy[tmp_index] = tmph[tmp_index] + h - 2 - ey[tmp_index]
         ey[tmp_index] = h - 1
 
-        tmp_index = np.where(x < 0)
+        tmp_index = (x < 0).nonzero()
         dx[tmp_index] = 0 - x[tmp_index]
         x[tmp_index] = 0
 
-        tmp_index = np.where(y < 0)
+        tmp_index = (y < 0).nonzero()
         dy[tmp_index] = 0 - y[tmp_index]
         y[tmp_index] = 0
 
         return_list = [dy, edy, dx, edx, y, ey, x, ex, tmpw, tmph]
-        return_list = [item.astype(np.int32) for item in return_list]
+        return_list = [item.int() for item in return_list]
 
         return return_list
 
-
+    
     def detect_pnet(self, im):
         """Get face candidates through pnet
 
         Parameters:
         ----------
-        im: numpy array
+        im: torch Tensor
             input image array
 
         Returns:
@@ -244,40 +235,30 @@ class MtcnnDetector(object):
             boxes after calibration
         """
 
-        # im = self.unique_image_format(im)
 
-        h, w, c = im.shape
         net_size = 12
-
         current_scale = float(net_size) / self.min_face_size    # find initial scale
         im_resized = self.resize_image(im, current_scale)
-        current_height, current_width, _ = im_resized.shape
+        _, _, current_height, current_width = im_resized.shape
 
         # fcn
         all_boxes = list()
         while min(current_height, current_width) > net_size:
-            feed_imgs = []
-            image_tensor = image_tools.convert_image_to_tensor(im_resized)
-            feed_imgs.append(image_tensor)
-            feed_imgs = torch.stack(feed_imgs)
+            feed_imgs = im_resized
 
             if self.pnet_detector.use_cuda:
                 feed_imgs = feed_imgs.cuda()
 
             cls_map, reg = self.pnet_detector(feed_imgs.float())
 
-            cls_map_np = image_tools.convert_chwTensor_to_hwcNumpy(cls_map.cpu())
-            reg_np = image_tools.convert_chwTensor_to_hwcNumpy(reg.cpu())
-            # landmark_np = image_tools.convert_chwTensor_to_hwcNumpy(landmark.cpu())
-
-
-            boxes = self.generate_bounding_box(cls_map_np[ 0, :, :], reg_np, current_scale, self.thresh[0])
+            boxes = self.generate_bounding_box(cls_map[ 0, :, :], reg, current_scale, self.thresh[0])
 
             current_scale *= self.scale_factor
+            
             im_resized = self.resize_image(im, current_scale)
-            current_height, current_width, _ = im_resized.shape
+            _, _, current_height, current_width = im_resized.shape
 
-            if boxes.size == 0:
+            if boxes.nelement() == 0:
                 continue
             keep = utils.nms(boxes[:, :5], 0.5, 'Union')
             boxes = boxes[keep]
@@ -285,8 +266,7 @@ class MtcnnDetector(object):
 
         if len(all_boxes) == 0:
             return None, None
-
-        all_boxes = np.vstack(all_boxes)
+        all_boxes = torch.cat(all_boxes)
 
         # merge the detection from first stage
         keep = utils.nms(all_boxes[:, 0:5], 0.7, 'Union')
@@ -299,24 +279,9 @@ class MtcnnDetector(object):
         # landmark_keep = all_boxes[:, 9:].reshape((5,2))
 
 
-        boxes = np.vstack([all_boxes[:,0],
-                   all_boxes[:,1],
-                   all_boxes[:,2],
-                   all_boxes[:,3],
-                   all_boxes[:,4],
-                   # all_boxes[:, 0] + all_boxes[:, 9] * bw,
-                   # all_boxes[:, 1] + all_boxes[:,10] * bh,
-                   # all_boxes[:, 0] + all_boxes[:, 11] * bw,
-                   # all_boxes[:, 1] + all_boxes[:, 12] * bh,
-                   # all_boxes[:, 0] + all_boxes[:, 13] * bw,
-                   # all_boxes[:, 1] + all_boxes[:, 14] * bh,
-                   # all_boxes[:, 0] + all_boxes[:, 15] * bw,
-                   # all_boxes[:, 1] + all_boxes[:, 16] * bh,
-                   # all_boxes[:, 0] + all_boxes[:, 17] * bw,
-                   # all_boxes[:, 1] + all_boxes[:, 18] * bh
-                  ])
+        boxes = all_boxes[:,:5]
 
-        boxes = boxes.T
+        # boxes = boxes.t()
 
         align_topx = all_boxes[:, 0] + all_boxes[:, 5] * bw
         align_topy = all_boxes[:, 1] + all_boxes[:, 6] * bh
@@ -324,32 +289,23 @@ class MtcnnDetector(object):
         align_bottomy = all_boxes[:, 3] + all_boxes[:, 8] * bh
 
         # refine the boxes
-        boxes_align = np.vstack([ align_topx,
+        boxes_align = torch.stack([ align_topx,
                               align_topy,
                               align_bottomx,
                               align_bottomy,
                               all_boxes[:, 4],
-                              # align_topx + all_boxes[:,9] * bw,
-                              # align_topy + all_boxes[:,10] * bh,
-                              # align_topx + all_boxes[:,11] * bw,
-                              # align_topy + all_boxes[:,12] * bh,
-                              # align_topx + all_boxes[:,13] * bw,
-                              # align_topy + all_boxes[:,14] * bh,
-                              # align_topx + all_boxes[:,15] * bw,
-                              # align_topy + all_boxes[:,16] * bh,
-                              # align_topx + all_boxes[:,17] * bw,
-                              # align_topy + all_boxes[:,18] * bh,
-                              ])
-        boxes_align = boxes_align.T
+                              ],dim=-1)
+        # boxes_align = boxes_align.t()
 
         return boxes, boxes_align
 
+    
     def detect_rnet(self, im, dets):
         """Get face candidates using rnet
 
         Parameters:
         ----------
-        im: numpy array
+        im: torch Tensor 1x3xHxW
             input image array
         dets: numpy array
             detection results of pnet
@@ -361,14 +317,13 @@ class MtcnnDetector(object):
         boxes_align: numpy array
             boxes after calibration
         """
-        h, w, c = im.shape
+        _, _, h, w = im.shape
 
         if dets is None:
             return None,None
 
         dets = self.square_bbox(dets)
-        dets[:, 0:4] = np.round(dets[:, 0:4])
-
+        dets[:, 0:4] = torch.round(dets[:, 0:4])
         [dy, edy, dx, edx, y, ey, x, ex, tmpw, tmph] = self.pad(dets, w, h)
         num_boxes = dets.shape[0]
 
@@ -378,35 +333,34 @@ class MtcnnDetector(object):
         ratio = float(num_boxes) / batch_size
         if ratio > 3 or ratio < 0.3:
             print "You may need to reset RNet batch size if this info appears frequently, \
-face candidates:%d, current batch_size:%d"%(num_boxes, batch_size)
+        face candidates:%d, current batch_size:%d"%(num_boxes, batch_size)
         '''
 
         # cropped_ims_tensors = np.zeros((num_boxes, 3, 24, 24), dtype=np.float32)
         cropped_ims_tensors = []
         for i in range(num_boxes):
-            tmp = np.zeros((tmph[i], tmpw[i], 3), dtype=np.uint8)
-            tmp[dy[i]:edy[i]+1, dx[i]:edx[i]+1, :] = im[y[i]:ey[i]+1, x[i]:ex[i]+1, :]
-            crop_im = cv2.resize(tmp, (24, 24))
-            crop_im_tensor = image_tools.convert_image_to_tensor(crop_im)
-            # cropped_ims_tensors[i, :, :, :] = crop_im_tensor
+            tmp = self.tensortype.FloatTensor(1, 3, tmph[i], tmpw[i]).fill_(0)
+            tmp[..., dy[i]:edy[i]+1, dx[i]:edx[i]+1] = im[..., y[i]:ey[i]+1, x[i]:ex[i]+1]
+            crop_im = F.interpolate(tmp, size=(24, 24))
+            crop_im_tensor = crop_im
             cropped_ims_tensors.append(crop_im_tensor)
-        feed_imgs = torch.stack(cropped_ims_tensors)
+        feed_imgs = torch.cat(cropped_ims_tensors)
 
         if self.rnet_detector.use_cuda:
             feed_imgs = feed_imgs.cuda()
 
-        cls_map, reg = self.rnet_detector(feed_imgs.float())
+        cls_map, reg = self.rnet_detector(feed_imgs)
 
-        cls_map = cls_map.cpu().data.numpy()
-        reg = reg.cpu().data.numpy()
+        cls_map = cls_map
+        reg = reg
         # landmark = landmark.cpu().data.numpy()
 
 
-        keep_inds = np.where(cls_map > self.thresh[1])[0]
+        keep_inds = (cls_map.squeeze() > self.thresh[1]).nonzero().squeeze()
 
         if len(keep_inds) > 0:
             boxes = dets[keep_inds]
-            cls = cls_map[keep_inds]
+            _cls = cls_map[keep_inds]
             reg = reg[keep_inds]
             # landmark = landmark[keep_inds]
         else:
@@ -417,7 +371,7 @@ face candidates:%d, current batch_size:%d"%(num_boxes, batch_size)
         if len(keep) == 0:
             return None, None
 
-        keep_cls = cls[keep]
+        keep_cls = _cls[keep]
         keep_boxes = boxes[keep]
         keep_reg = reg[keep]
         # keep_landmark = landmark[keep]
@@ -427,50 +381,23 @@ face candidates:%d, current batch_size:%d"%(num_boxes, batch_size)
         bh = keep_boxes[:, 3] - keep_boxes[:, 1] + 1
 
 
-        boxes = np.vstack([ keep_boxes[:,0],
-                              keep_boxes[:,1],
-                              keep_boxes[:,2],
-                              keep_boxes[:,3],
-                              keep_cls[:,0],
-                              # keep_boxes[:,0] + keep_landmark[:, 0] * bw,
-                              # keep_boxes[:,1] + keep_landmark[:, 1] * bh,
-                              # keep_boxes[:,0] + keep_landmark[:, 2] * bw,
-                              # keep_boxes[:,1] + keep_landmark[:, 3] * bh,
-                              # keep_boxes[:,0] + keep_landmark[:, 4] * bw,
-                              # keep_boxes[:,1] + keep_landmark[:, 5] * bh,
-                              # keep_boxes[:,0] + keep_landmark[:, 6] * bw,
-                              # keep_boxes[:,1] + keep_landmark[:, 7] * bh,
-                              # keep_boxes[:,0] + keep_landmark[:, 8] * bw,
-                              # keep_boxes[:,1] + keep_landmark[:, 9] * bh,
-                            ])
+        boxes = torch.cat([ keep_boxes[:,0:4], keep_cls[:,0:1]], dim=-1)
 
         align_topx = keep_boxes[:,0] + keep_reg[:,0] * bw
         align_topy = keep_boxes[:,1] + keep_reg[:,1] * bh
         align_bottomx = keep_boxes[:,2] + keep_reg[:,2] * bw
         align_bottomy = keep_boxes[:,3] + keep_reg[:,3] * bh
 
-        boxes_align = np.vstack([align_topx,
+        boxes_align = torch.stack([align_topx,
                                align_topy,
                                align_bottomx,
                                align_bottomy,
                                keep_cls[:, 0],
-                               # align_topx + keep_landmark[:, 0] * bw,
-                               # align_topy + keep_landmark[:, 1] * bh,
-                               # align_topx + keep_landmark[:, 2] * bw,
-                               # align_topy + keep_landmark[:, 3] * bh,
-                               # align_topx + keep_landmark[:, 4] * bw,
-                               # align_topy + keep_landmark[:, 5] * bh,
-                               # align_topx + keep_landmark[:, 6] * bw,
-                               # align_topy + keep_landmark[:, 7] * bh,
-                               # align_topx + keep_landmark[:, 8] * bw,
-                               # align_topy + keep_landmark[:, 9] * bh,
-                             ])
-
-        boxes = boxes.T
-        boxes_align = boxes_align.T
+                             ], dim=-1)
 
         return boxes, boxes_align
 
+    
     def detect_onet(self, im, dets):
         """Get face candidates using onet
 
@@ -489,13 +416,13 @@ face candidates:%d, current batch_size:%d"%(num_boxes, batch_size)
             landmarks after calibration
 
         """
-        h, w, c = im.shape
+        _, _, h, w = im.shape
 
         if dets is None:
             return None, None
 
         dets = self.square_bbox(dets)
-        dets[:, 0:4] = np.round(dets[:, 0:4])
+        dets[:, 0:4] = torch.round(dets[:, 0:4])
 
         [dy, edy, dx, edx, y, ey, x, ex, tmpw, tmph] = self.pad(dets, w, h)
         num_boxes = dets.shape[0]
@@ -504,28 +431,24 @@ face candidates:%d, current batch_size:%d"%(num_boxes, batch_size)
         # cropped_ims_tensors = np.zeros((num_boxes, 3, 24, 24), dtype=np.float32)
         cropped_ims_tensors = []
         for i in range(num_boxes):
-            tmp = np.zeros((tmph[i], tmpw[i], 3), dtype=np.uint8)
-            tmp[dy[i]:edy[i] + 1, dx[i]:edx[i] + 1, :] = im[y[i]:ey[i] + 1, x[i]:ex[i] + 1, :]
-            crop_im = cv2.resize(tmp, (48, 48))
-            crop_im_tensor = image_tools.convert_image_to_tensor(crop_im)
+            tmp = self.tensortype.FloatTensor(1, 3, tmph[i], tmpw[i]).fill_(0)
+            tmp[..., dy[i]:edy[i]+1, dx[i]:edx[i]+1] = im[..., y[i]:ey[i]+1, x[i]:ex[i]+1]
+            crop_im = F.interpolate(tmp, size=(48, 48))
+            crop_im_tensor = crop_im
             # cropped_ims_tensors[i, :, :, :] = crop_im_tensor
             cropped_ims_tensors.append(crop_im_tensor)
-        feed_imgs = torch.stack(cropped_ims_tensors)
+        feed_imgs = torch.cat(cropped_ims_tensors)
 
         if self.rnet_detector.use_cuda:
             feed_imgs = feed_imgs.cuda()
 
-        cls_map, reg, landmark = self.onet_detector(feed_imgs.float())
+        cls_map, reg, landmark = self.onet_detector(feed_imgs)
 
-        cls_map = cls_map.cpu().data.numpy()
-        reg = reg.cpu().data.numpy()
-        landmark = landmark.cpu().data.numpy()
-
-        keep_inds = np.where(cls_map > self.thresh[2])[0]
+        keep_inds = (cls_map.squeeze() > self.thresh[2]).nonzero().squeeze()
 
         if len(keep_inds) > 0:
             boxes = dets[keep_inds]
-            cls = cls_map[keep_inds]
+            _cls = cls_map[keep_inds]
             reg = reg[keep_inds]
             landmark = landmark[keep_inds]
         else:
@@ -536,7 +459,7 @@ face candidates:%d, current batch_size:%d"%(num_boxes, batch_size)
         if len(keep) == 0:
             return None, None
 
-        keep_cls = cls[keep]
+        keep_cls = _cls[keep]
         keep_boxes = boxes[keep]
         keep_reg = reg[keep]
         keep_landmark = landmark[keep]
@@ -556,27 +479,14 @@ face candidates:%d, current batch_size:%d"%(num_boxes, batch_size)
 
 
 
-        boxes_align = np.vstack([align_topx,
+        boxes_align = torch.stack([align_topx,
                                  align_topy,
                                  align_bottomx,
                                  align_bottomy,
                                  keep_cls[:, 0],
-                                 # align_topx + keep_landmark[:, 0] * bw,
-                                 # align_topy + keep_landmark[:, 1] * bh,
-                                 # align_topx + keep_landmark[:, 2] * bw,
-                                 # align_topy + keep_landmark[:, 3] * bh,
-                                 # align_topx + keep_landmark[:, 4] * bw,
-                                 # align_topy + keep_landmark[:, 5] * bh,
-                                 # align_topx + keep_landmark[:, 6] * bw,
-                                 # align_topy + keep_landmark[:, 7] * bh,
-                                 # align_topx + keep_landmark[:, 8] * bw,
-                                 # align_topy + keep_landmark[:, 9] * bh,
-                                 ])
+                                 ],dim=-1)
 
-        boxes_align = boxes_align.T
-
-        landmark =  np.vstack([
-                                 align_landmark_topx + keep_landmark[:, 0] * bw,
+        landmark =  torch.stack([align_landmark_topx + keep_landmark[:, 0] * bw,
                                  align_landmark_topy + keep_landmark[:, 1] * bh,
                                  align_landmark_topx + keep_landmark[:, 2] * bw,
                                  align_landmark_topy + keep_landmark[:, 3] * bh,
@@ -586,48 +496,37 @@ face candidates:%d, current batch_size:%d"%(num_boxes, batch_size)
                                  align_landmark_topy + keep_landmark[:, 7] * bh,
                                  align_landmark_topx + keep_landmark[:, 8] * bw,
                                  align_landmark_topy + keep_landmark[:, 9] * bh,
-                                 ])
+                                 ], dim=-1)
 
-        landmark_align = landmark.T
-
-        return boxes_align, landmark_align
+        return boxes_align, landmark
 
 
     def detect_face(self,img):
-        """Detect face over image
-        """
-        boxes_align = np.array([])
-        landmark_align =np.array([])
+        """Detect face over image"""
+        boxes_align = torch.Tensor([])
+        landmark_align = torch.Tensor([])
 
-        t = time.time()
+        img = image_tools.convert_image_to_tensor(img).unsqueeze(0)
+        if self.use_cuda:
+            img = img.cuda()
 
         # pnet
         if self.pnet_detector:
-            boxes, boxes_align = self.detect_pnet(img)
+            boxes, boxes_align = self.detect_pnet(img.clone())
             if boxes_align is None:
-                return np.array([]), np.array([])
-
-            t1 = time.time() - t
-            t = time.time()
+                return torch.Tensor([]), torch.Tensor([])
 
         # rnet
         if self.rnet_detector:
-            boxes, boxes_align = self.detect_rnet(img, boxes_align)
+            boxes, boxes_align = self.detect_rnet(img.clone(), boxes_align)
             if boxes_align is None:
-                return np.array([]), np.array([])
-
-            t2 = time.time() - t
-            t = time.time()
+                return torch.Tensor([]), torch.Tensor([])
 
         # onet
         if self.onet_detector:
-            boxes_align, landmark_align = self.detect_onet(img, boxes_align)
+            boxes_align, landmark_align = self.detect_onet(img.clone(), boxes_align)
             if boxes_align is None:
-                return np.array([]), np.array([])
-
-            t3 = time.time() - t
-            t = time.time()
-            # print("time cost " + '{:.3f}'.format(t1+t2+t3) + '  pnet {:.3f}  rnet {:.3f}  onet {:.3f}'.format(t1, t2, t3))
+                return torch.Tensor([]), torch.Tensor([])
 
         return boxes_align, landmark_align
 

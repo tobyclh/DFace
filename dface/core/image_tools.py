@@ -22,14 +22,14 @@ def convert_image_to_tensor(image):
 
 
 def convert_chwTensor_to_hwcNumpy(tensor):
-    """convert a group images pytorch tensor(count * c * h * w) to numpy array images(count * h * w * c)
+    """convert a group images pytorch tensor(BxCxHxW) to numpy array images(BxHxWxC)
             Parameters:
             ----------
-            tensor: numpy array , count * c * h * w
+            tensor: numpy array , BxCxHxW
 
             Returns:
             -------
-            numpy array images: count * h * w * c
+            numpy array images: BxHxWxC
             """
 
     if isinstance(tensor, Variable):
