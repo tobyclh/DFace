@@ -326,6 +326,9 @@ class MtcnnDetector(object):
         dets[:, 0:4] = torch.round(dets[:, 0:4])
         [dy, edy, dx, edx, y, ey, x, ex, tmpw, tmph] = self.pad(dets, w, h)
         num_boxes = dets.shape[0]
+        if num_boxes == 0:
+            return None, None
+
 
         '''
         # helper for setting RNet batch size
@@ -358,7 +361,7 @@ class MtcnnDetector(object):
 
         keep_inds = (cls_map.squeeze() > self.thresh[1]).nonzero().squeeze()
 
-        if len(keep_inds) > 0:
+        if keep_inds.dim() > 0 and len(keep_inds) > 0:
             boxes = dets[keep_inds]
             _cls = cls_map[keep_inds]
             reg = reg[keep_inds]
@@ -446,7 +449,7 @@ class MtcnnDetector(object):
 
         keep_inds = (cls_map.squeeze() > self.thresh[2]).nonzero().squeeze()
 
-        if len(keep_inds) > 0:
+        if keep_inds.dim() > 0 and len(keep_inds) > 0:
             boxes = dets[keep_inds]
             _cls = cls_map[keep_inds]
             reg = reg[keep_inds]
